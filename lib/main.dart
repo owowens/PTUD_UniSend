@@ -19,6 +19,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   var firebaseReady = false;
+  String? firebaseInitError;
 
   // Khởi tạo Firebase: trên web cần truyền FirebaseOptions
   try {
@@ -40,6 +41,7 @@ Future<void> main() async {
     }
     firebaseReady = true;
   } catch (e) {
+    firebaseInitError = e.toString();
     debugPrint('Firebase init failed, running in UI-only mode: $e');
   }
 
@@ -52,13 +54,20 @@ Future<void> main() async {
     debugPrint('Supabase init failed, continue with local UI: $e');
   }
 
-  runApp(MainApp(firebaseReady: firebaseReady));
+  runApp(
+    MainApp(firebaseReady: firebaseReady, firebaseInitError: firebaseInitError),
+  );
 }
 
 class MainApp extends StatefulWidget {
-  const MainApp({super.key, required this.firebaseReady});
+  const MainApp({
+    super.key,
+    required this.firebaseReady,
+    this.firebaseInitError,
+  });
 
   final bool firebaseReady;
+  final String? firebaseInitError;
 
   @override
   State<MainApp> createState() => _MainAppState();
@@ -126,7 +135,21 @@ class _MainAppState extends State<MainApp> {
 
   @override
   Widget build(BuildContext context) {
-    final shouldBypassAuth = kBypassLogin || !widget.firebaseReady;
+    final shouldBypassAuth = kBypassLogin;
+
+    if (!widget.firebaseReady && !shouldBypassAuth) {
+      return MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: _buildTheme(Brightness.light),
+        darkTheme: _buildTheme(Brightness.dark),
+        themeMode: _themeMode,
+        home: _FirebaseConfigErrorScreen(
+          errorMessage:
+              widget.firebaseInitError ??
+              'Firebase chua khoi tao duoc. Kiem tra cau hinh Android/iOS/Web.',
+        ),
+      );
+    }
 
     return MaterialApp(
       debugShowCheckedModeBanner: false,
@@ -178,6 +201,38 @@ class _MainAppState extends State<MainApp> {
                 return LoginScreen(onSignedIn: () => setState(() {}));
               },
             ),
+    );
+  }
+}
+
+class _FirebaseConfigErrorScreen extends StatelessWidget {
+  const _FirebaseConfigErrorScreen({required this.errorMessage});
+
+  final String errorMessage;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Loi cau hinh Firebase')),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Ung dung dang o che do Firebase that. Vui long kiem tra cau hinh.',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 12),
+            SelectableText(errorMessage),
+            const SizedBox(height: 20),
+            Text(
+              'Neu can bo qua tam thoi de test UI, chay voi --dart-define=BYPASS_LOGIN=true.',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

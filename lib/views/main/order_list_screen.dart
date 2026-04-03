@@ -1,6 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 
 import '../../models/order.dart';
+import '../../services/firestore_service.dart';
+import '../../services/location_service.dart';
 import '../../services/order_service.dart';
 import '../../services/user_session_service.dart';
 import '../../widgets/common/order_card.dart';
@@ -42,6 +48,8 @@ class _OrderListScreenState extends State<OrderListScreen>
 
   late final TabController _tabController;
   final TextEditingController _switchUserController = TextEditingController();
+  final FirestoreService _firestoreService = FirestoreService();
+  List<DeliveryOrder> _latestOrders = const <DeliveryOrder>[];
 
   @override
   void initState() {
@@ -62,12 +70,27 @@ class _OrderListScreenState extends State<OrderListScreen>
     );
   }
 
+  Set<String> _knownUserIdsFromOrders(String currentUserId) {
+    final ids = <String>{
+      if (currentUserId.trim().isNotEmpty) currentUserId.trim(),
+    };
+
+    for (final order in _latestOrders) {
+      ids.add(order.senderId);
+      ids.add(order.receiverId);
+      ids.add(order.createdBy);
+      if (order.carrierId != null && order.carrierId!.trim().isNotEmpty) {
+        ids.add(order.carrierId!.trim());
+      }
+    }
+
+    return ids;
+  }
+
   Future<void> _showSwitchUserDialog(String currentUserId) async {
     _switchUserController.text = currentUserId;
 
-    final knownIds =
-        widget.orderService.knownUserIds(currentUserId: currentUserId).toList()
-          ..sort();
+    final knownIds = _knownUserIdsFromOrders(currentUserId).toList()..sort();
 
     await showDialog<void>(
       context: context,
@@ -196,6 +219,24 @@ class _OrderListScreenState extends State<OrderListScreen>
     return cleaned;
   }
 
+  String _formatLocationForCard(Location location) {
+    final address = location.address?.trim();
+    if (address != null && address.isNotEmpty) {
+      return address;
+    }
+    return '${location.latitude.toStringAsFixed(5)}, ${location.longitude.toStringAsFixed(5)}';
+  }
+
+  String _buildRouteDetails(DeliveryOrder order) {
+    final fromLabel = _formatLocationForCard(order.senderLocation);
+    final toLabel = _formatLocationForCard(order.receiverLocation);
+    final distanceKm = order.senderLocation.distanceTo(order.receiverLocation);
+
+    return 'Lay hang: $fromLabel\n'
+        'Giao hang: $toLabel\n'
+        'Khoang cach du kien: ${distanceKm.toStringAsFixed(2)} km';
+  }
+
   String? _firstDeniedReason(OrderPermissions permissions) {
     final constraints = <OrderActionConstraint>[
       permissions.acceptAction,
@@ -302,9 +343,74 @@ class _OrderListScreenState extends State<OrderListScreen>
     }
   }
 
+  Future<void> _acceptOrder(DeliveryOrder order, String currentUserId) async {
+    try {
+      await _firestoreService.acceptOrder(order.id, currentUserId);
+      _showMessage('Đã nhận đơn thành công.');
+    } catch (e) {
+      _showMessage('Không thể nhận đơn: $e');
+    }
+  }
+
+  Future<void> _markDelivered(DeliveryOrder order) async {
+    try {
+      await _firestoreService.updateDeliveryLocation(
+        order.id,
+        order.receiverLocation,
+      );
+      _showMessage('Đơn đã được đánh dấu hoàn tất.');
+    } catch (e) {
+      _showMessage('Không thể hoàn tất đơn: $e');
+    }
+  }
+
+  Future<void> _cancelOrder(DeliveryOrder order) async {
+    try {
+      await _firestoreService.cancelOrder(order.id);
+      _showMessage('Đã hủy đơn thành công.');
+    } catch (e) {
+      _showMessage('Không thể hủy đơn: $e');
+    }
+  }
+
+  Future<void> _editOrderLocations(
+    DeliveryOrder order,
+    String currentUserId,
+  ) async {
+    final editedResult = await showModalBottomSheet<_OrderLocationEditResult>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (_) => FractionallySizedBox(
+        heightFactor: 0.95,
+        child: _EditOrderLocationsSheet(
+          initialSenderLocation: order.senderLocation,
+          initialReceiverLocation: order.receiverLocation,
+        ),
+      ),
+    );
+
+    if (!mounted || editedResult == null) {
+      return;
+    }
+
+    try {
+      await _firestoreService.updateOrderLocations(
+        orderId: order.id,
+        actorUserId: currentUserId,
+        senderLocation: editedResult.senderLocation,
+        receiverLocation: editedResult.receiverLocation,
+      );
+      _showMessage('Đã cập nhật địa chỉ gửi/nhận.');
+    } catch (e) {
+      _showMessage('Không thể cập nhật địa chỉ: $e');
+    }
+  }
+
   List<OrderCardAction> _buildActions(
     DeliveryOrder order,
     OrderPermissions permissions,
+    OrderActorFlags actors,
     String currentUserId,
   ) {
     final actions = <OrderCardAction>[];
@@ -316,13 +422,7 @@ class _OrderListScreenState extends State<OrderListScreen>
           icon: Icons.how_to_reg_outlined,
           isEnabled: permissions.acceptAction.isEnabled,
           onPressed: permissions.acceptAction.isEnabled
-              ? () {
-                  final result = widget.orderService.acceptOrder(
-                    order.id,
-                    currentUserId,
-                  );
-                  _showMessage(result.message);
-                }
+              ? () => _acceptOrder(order, currentUserId)
               : null,
         ),
       );
@@ -335,13 +435,7 @@ class _OrderListScreenState extends State<OrderListScreen>
           icon: Icons.done_all_outlined,
           isEnabled: permissions.markDeliveredAction.isEnabled,
           onPressed: permissions.markDeliveredAction.isEnabled
-              ? () {
-                  final result = widget.orderService.markDelivered(
-                    order.id,
-                    currentUserId,
-                  );
-                  _showMessage(result.message);
-                }
+              ? () => _markDelivered(order)
               : null,
         ),
       );
@@ -355,14 +449,23 @@ class _OrderListScreenState extends State<OrderListScreen>
           isEnabled: permissions.cancelAction.isEnabled,
           isDestructive: true,
           onPressed: permissions.cancelAction.isEnabled
-              ? () {
-                  final result = widget.orderService.cancelOrder(
-                    order.id,
-                    currentUserId,
-                  );
-                  _showMessage(result.message);
-                }
+              ? () => _cancelOrder(order)
               : null,
+        ),
+      );
+    }
+
+    final canEditLocations =
+        order.status == OrderStatus.waitingCarrier &&
+        !order.hasCarrier &&
+        (actors.isSender || actors.isCreator);
+
+    if (canEditLocations) {
+      actions.add(
+        OrderCardAction(
+          label: 'Sửa địa chỉ',
+          icon: Icons.edit_location_alt_outlined,
+          onPressed: () => _editOrderLocations(order, currentUserId),
         ),
       );
     }
@@ -452,7 +555,8 @@ class _OrderListScreenState extends State<OrderListScreen>
 
         return OrderCard(
           title: order.title,
-          description: _toFriendlyDescription(order.description),
+          description:
+              '${_toFriendlyDescription(order.description)}\n\n${_buildRouteDetails(order)}',
           deadline: 'Hạn giao: ${_formatDeadline(order.deadlineAt)}',
           statusText: _tabLabel(order.status),
           statusIcon: _tabIcon(order.status),
@@ -461,7 +565,7 @@ class _OrderListScreenState extends State<OrderListScreen>
           summaryText: cardMessage.text,
           summaryIcon: cardMessage.icon,
           summaryColor: cardMessage.color,
-          actions: _buildActions(order, permissions, currentUserId),
+          actions: _buildActions(order, permissions, actors, currentUserId),
         );
       },
     );
@@ -473,9 +577,33 @@ class _OrderListScreenState extends State<OrderListScreen>
       animation: widget.userSessionService,
       builder: (context, child) {
         final currentUserId = widget.userSessionService.currentUserId;
-        return ValueListenableBuilder<List<DeliveryOrder>>(
-          valueListenable: widget.orderService.ordersListenable,
-          builder: (context, orders, child) {
+        return StreamBuilder<List<DeliveryOrder>>(
+          stream: _firestoreService.watchAllOrders(),
+          builder: (context, snapshot) {
+            if (snapshot.hasError) {
+              return Scaffold(
+                appBar: AppBar(title: const Text('Đơn hàng')),
+                body: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Text(
+                      'Không tải được danh sách đơn: ${snapshot.error}',
+                    ),
+                  ),
+                ),
+              );
+            }
+
+            final orders = snapshot.data ?? const <DeliveryOrder>[];
+            _latestOrders = orders;
+
+            if (snapshot.connectionState == ConnectionState.waiting &&
+                orders.isEmpty) {
+              return const Scaffold(
+                body: Center(child: CircularProgressIndicator()),
+              );
+            }
+
             return Scaffold(
               appBar: AppBar(
                 title: const Text('Đơn hàng'),
@@ -510,6 +638,410 @@ class _OrderListScreenState extends State<OrderListScreen>
           },
         );
       },
+    );
+  }
+}
+
+class _OrderLocationEditResult {
+  const _OrderLocationEditResult({
+    required this.senderLocation,
+    required this.receiverLocation,
+  });
+
+  final Location senderLocation;
+  final Location receiverLocation;
+}
+
+class _EditOrderLocationsSheet extends StatefulWidget {
+  const _EditOrderLocationsSheet({
+    required this.initialSenderLocation,
+    required this.initialReceiverLocation,
+  });
+
+  final Location initialSenderLocation;
+  final Location initialReceiverLocation;
+
+  @override
+  State<_EditOrderLocationsSheet> createState() =>
+      _EditOrderLocationsSheetState();
+}
+
+class _EditOrderLocationsSheetState extends State<_EditOrderLocationsSheet> {
+  late Location _senderLocation;
+  late Location _receiverLocation;
+  bool _isSaving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _senderLocation = widget.initialSenderLocation;
+    _receiverLocation = widget.initialReceiverLocation;
+  }
+
+  String _formatLocation(Location location) {
+    final address = location.address?.trim();
+    if (address != null && address.isNotEmpty) {
+      return address;
+    }
+    return '${location.latitude.toStringAsFixed(5)}, ${location.longitude.toStringAsFixed(5)}';
+  }
+
+  Future<void> _pickLocation({required bool isSender}) async {
+    final initialLocation = isSender ? _senderLocation : _receiverLocation;
+
+    final selected = await showModalBottomSheet<Location>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (_) => FractionallySizedBox(
+        heightFactor: 0.95,
+        child: _OrderLocationPickerSheet(
+          title: isSender ? 'Sửa địa chỉ lấy hàng' : 'Sửa địa chỉ giao hàng',
+          initialLocation: initialLocation,
+        ),
+      ),
+    );
+
+    if (!mounted || selected == null) {
+      return;
+    }
+
+    setState(() {
+      if (isSender) {
+        _senderLocation = selected;
+      } else {
+        _receiverLocation = selected;
+      }
+    });
+  }
+
+  void _save() {
+    if (_isSaving) {
+      return;
+    }
+
+    setState(() {
+      _isSaving = true;
+    });
+
+    Navigator.of(context).pop(
+      _OrderLocationEditResult(
+        senderLocation: _senderLocation,
+        receiverLocation: _receiverLocation,
+      ),
+    );
+  }
+
+  Widget _buildTile({
+    required String title,
+    required Location value,
+    required VoidCallback onPick,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: Theme.of(context).textTheme.labelLarge),
+          const SizedBox(height: 6),
+          Text(
+            _formatLocation(value),
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Tọa độ: ${value.latitude.toStringAsFixed(5)}, ${value.longitude.toStringAsFixed(5)}',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            onPressed: onPick,
+            icon: const Icon(Icons.map_outlined),
+            label: const Text('Chọn trên bản đồ'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Sửa địa chỉ đơn hàng')),
+      body: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildTile(
+              title: 'Địa chỉ lấy hàng',
+              value: _senderLocation,
+              onPick: () => _pickLocation(isSender: true),
+            ),
+            const SizedBox(height: 12),
+            _buildTile(
+              title: 'Địa chỉ giao hàng',
+              value: _receiverLocation,
+              onPick: () => _pickLocation(isSender: false),
+            ),
+            const Spacer(),
+            FilledButton.icon(
+              onPressed: _isSaving ? null : _save,
+              icon: const Icon(Icons.save_outlined),
+              label: const Text('Lưu địa chỉ mới'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _OrderLocationPickerSheet extends StatefulWidget {
+  const _OrderLocationPickerSheet({
+    required this.title,
+    required this.initialLocation,
+  });
+
+  final String title;
+  final Location initialLocation;
+
+  @override
+  State<_OrderLocationPickerSheet> createState() =>
+      _OrderLocationPickerSheetState();
+}
+
+class _OrderLocationPickerSheetState extends State<_OrderLocationPickerSheet> {
+  static const String _tileUrlTemplate =
+      'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+  static const double _minZoom = 5.0;
+  static const double _maxZoom = 18.0;
+
+  final MapController _mapController = MapController();
+  final LocationService _locationService = LocationService();
+
+  late LatLng _selectedPoint;
+  late double _currentZoom;
+  Timer? _resolveDebounce;
+  String? _selectedAddress;
+  bool _isResolvingAddress = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedPoint = LatLng(
+      widget.initialLocation.latitude,
+      widget.initialLocation.longitude,
+    );
+    _selectedAddress = widget.initialLocation.address;
+    _currentZoom = 15;
+
+    if ((_selectedAddress ?? '').trim().isEmpty) {
+      _resolveAddress();
+    }
+  }
+
+  @override
+  void dispose() {
+    _resolveDebounce?.cancel();
+    super.dispose();
+  }
+
+  String _fallbackAddress(LatLng point) {
+    return '${point.latitude.toStringAsFixed(5)}, ${point.longitude.toStringAsFixed(5)}';
+  }
+
+  Future<void> _resolveAddress() async {
+    final target = _selectedPoint;
+    setState(() {
+      _isResolvingAddress = true;
+    });
+
+    final location = await _locationService.getLocationFromCoordinates(
+      target.latitude,
+      target.longitude,
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    final unchanged =
+        (target.latitude - _selectedPoint.latitude).abs() < 0.000001 &&
+        (target.longitude - _selectedPoint.longitude).abs() < 0.000001;
+
+    if (!unchanged) {
+      return;
+    }
+
+    setState(() {
+      _isResolvingAddress = false;
+      _selectedAddress = location?.address;
+    });
+  }
+
+  void _scheduleResolveAddress() {
+    _resolveDebounce?.cancel();
+    _resolveDebounce = Timer(
+      const Duration(milliseconds: 600),
+      _resolveAddress,
+    );
+  }
+
+  void _onPositionChanged(MapPosition position, bool hasGesture) {
+    final center = position.center;
+    if (center == null) {
+      return;
+    }
+
+    final zoom = (position.zoom ?? _currentZoom).clamp(_minZoom, _maxZoom);
+    final changed =
+        (center.latitude - _selectedPoint.latitude).abs() > 0.0000001 ||
+        (center.longitude - _selectedPoint.longitude).abs() > 0.0000001;
+
+    setState(() {
+      _selectedPoint = center;
+      _currentZoom = zoom;
+      if (changed) {
+        _selectedAddress = null;
+      }
+    });
+
+    if (changed) {
+      _scheduleResolveAddress();
+    }
+  }
+
+  void _zoomBy(double delta) {
+    final center = _mapController.camera.center;
+    final zoom = (_currentZoom + delta).clamp(_minZoom, _maxZoom);
+    _mapController.move(center, zoom);
+  }
+
+  void _confirm() {
+    Navigator.of(context).pop(
+      Location(
+        latitude: _selectedPoint.latitude,
+        longitude: _selectedPoint.longitude,
+        address: _selectedAddress ?? _fallbackAddress(_selectedPoint),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final addressLabel =
+        (_selectedAddress != null && _selectedAddress!.trim().isNotEmpty)
+        ? _selectedAddress!
+        : _fallbackAddress(_selectedPoint);
+
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.title)),
+      body: Column(
+        children: [
+          Expanded(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                FlutterMap(
+                  mapController: _mapController,
+                  options: MapOptions(
+                    initialCenter: _selectedPoint,
+                    initialZoom: _currentZoom,
+                    minZoom: _minZoom,
+                    maxZoom: _maxZoom,
+                    onPositionChanged: _onPositionChanged,
+                  ),
+                  children: [
+                    TileLayer(
+                      urlTemplate: _tileUrlTemplate,
+                      userAgentPackageName: 'com.example.unisend',
+                      tileProvider: NetworkTileProvider(
+                        headers: {'User-Agent': 'UniSend/1.0'},
+                      ),
+                    ),
+                    const SimpleAttributionWidget(
+                      source: Text('© OpenStreetMap contributors'),
+                      alignment: Alignment.bottomLeft,
+                    ),
+                  ],
+                ),
+                IgnorePointer(
+                  child: Center(
+                    child: Transform.translate(
+                      offset: const Offset(0, -18),
+                      child: const Icon(
+                        Icons.location_pin,
+                        size: 52,
+                        color: Colors.red,
+                      ),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  top: 12,
+                  right: 12,
+                  child: Material(
+                    color: Theme.of(context).colorScheme.surface.withAlpha(225),
+                    borderRadius: BorderRadius.circular(12),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          onPressed: () => _zoomBy(1),
+                          icon: const Icon(Icons.add),
+                          tooltip: 'Phóng to',
+                        ),
+                        IconButton(
+                          onPressed: () => _zoomBy(-1),
+                          icon: const Icon(Icons.remove),
+                          tooltip: 'Thu nhỏ',
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surface,
+              border: Border(
+                top: BorderSide(
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                ),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _isResolvingAddress ? 'Đang lấy địa chỉ...' : addressLabel,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Kéo bản đồ để chọn điểm. Ghim đỏ ở giữa chính là vị trí sẽ lưu.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 10),
+                FilledButton.icon(
+                  onPressed: _confirm,
+                  icon: const Icon(Icons.check_circle_outline),
+                  label: const Text('Dùng vị trí này'),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -1,12 +1,28 @@
 import 'dart:io';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 
 class StorageService {
-  // Khởi tạo client Supabase
-  final _supabase = Supabase.instance.client;
-  final _auth = FirebaseAuth.instance;
+  SupabaseClient? _tryGetSupabaseClient() {
+    try {
+      return Supabase.instance.client;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String _resolveUploaderId() {
+    try {
+      if (Firebase.apps.isEmpty) {
+        return 'anonymous';
+      }
+      return FirebaseAuth.instance.currentUser?.uid ?? 'anonymous';
+    } catch (_) {
+      return 'anonymous';
+    }
+  }
 
   /// Hàm upload ảnh dùng chung cho toàn bộ dự án
   /// [file]: File ảnh lấy từ ImagePicker
@@ -16,11 +32,17 @@ class StorageService {
     bool isAvatar = false,
   }) async {
     try {
+      final supabase = _tryGetSupabaseClient();
+      if (supabase == null) {
+        debugPrint('--- Supabase chưa được khởi tạo. Không thể upload ảnh.');
+        return null;
+      }
+
       // 1. Xác định bucket
       final String bucketName = isAvatar ? 'avatars' : 'orders';
 
       // 2. Dùng user id hiện tại cho mục đích tổ chức đường dẫn lưu file.
-      final String userId = _auth.currentUser?.uid ?? 'anonymous';
+      final String userId = _resolveUploaderId();
 
       // 3. Tạo đường dẫn file: userId/timestamp.jpg để tránh trùng lặp và dễ quản lý
       final String fileName = "${DateTime.now().millisecondsSinceEpoch}.jpg";
@@ -30,7 +52,7 @@ class StorageService {
       final Map<String, String> metadata = {'uploaded_by': userId};
 
       // 5. Thực hiện upload lên Supabase Storage kèm metadata
-      await _supabase.storage
+      await supabase.storage
           .from(bucketName)
           .upload(
             path,
@@ -47,10 +69,10 @@ class StorageService {
       // - Nếu là orders (private), tạo signed URL tạm thời.
       String url;
       if (isAvatar) {
-        url = _supabase.storage.from(bucketName).getPublicUrl(path);
+        url = supabase.storage.from(bucketName).getPublicUrl(path);
       } else {
         // thời hạn 1 giờ (3600s)
-        url = await _supabase.storage
+        url = await supabase.storage
             .from(bucketName)
             .createSignedUrl(path, 3600);
       }

@@ -51,6 +51,8 @@ class OrderService {
     required String imageUrl,
     required String senderId,
     required String receiverId,
+    required Location senderLocation,
+    required Location receiverLocation,
     DateTime? deadlineAt,
   }) {
     final now = DateTime.now();
@@ -66,6 +68,8 @@ class OrderService {
       imageUrl: imageUrl,
       senderId: normalizedSenderId,
       receiverId: receiverId.trim(),
+      senderLocation: senderLocation,
+      receiverLocation: receiverLocation,
       carrierId: null,
       createdBy: normalizedCurrentUserId,
       status: OrderStatus.waitingCarrier,

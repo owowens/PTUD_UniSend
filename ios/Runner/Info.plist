@@ -45,5 +45,23 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<!-- Quyền truy cập vị trị - Trong khi sử dụng ứng dụng -->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Ứng dụng cần quyền truy cập vị trí để:
+- Tìm đơn hàng gần bạn
+- Hiển thị vị trí nhận/gửi hàng
+- Theo dõi quá trình giao hàng</string>
+	<!-- Quyền truy cập vị trị - Luôn luôn (khi ứng dụng đang chạy background) -->
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Ứng dụng cần quyền truy cập vị trí luôn luôn để theo dõi quá trình giao hàng của bạn một cách chính xác</string>
+	<!-- Quyền truy cập vị trị - Luôn luôn (iOS 10 trở lên) -->
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>Ứng dụng cần quyền truy cập vị trí để theo dõi giao hàng</string>
+	<!-- Quyền truy cập Camera (cho chụp ảnh xác nhận) -->
+	<key>NSCameraUsageDescription</key>
+	<string>Ứng dụng cần quyền truy cập camera để chụp ảnh xác nhận lấy/giao hàng</string>
+	<!-- Quyền truy cập Photo Library (cho chọn ảnh) -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Ứng dụng cần quyền truy cập thư viện ảnh để chọn ảnh đơn hàng</string>
 </dict>
 </plist>

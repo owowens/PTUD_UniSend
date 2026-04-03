@@ -1,4 +1,54 @@
+import 'dart:math' as math;
+
 enum OrderStatus { waitingCarrier, waitingDelivery, completed, cancelled }
+
+/// Model đại diện cho một vị trí địa lý
+class Location {
+  const Location({
+    required this.latitude,
+    required this.longitude,
+    this.address,
+  });
+
+  final double latitude;
+  final double longitude;
+  final String?
+  address; // Địa chỉ con người đọc được (e.g., "123 Nguyễn Huệ, Q1, HCM")
+
+  /// Chuyển đổi từ Map (Firestore) thành Location
+  factory Location.fromMap(Map<String, dynamic> map) {
+    return Location(
+      latitude: (map['latitude'] as num).toDouble(),
+      longitude: (map['longitude'] as num).toDouble(),
+      address: map['address'] as String?,
+    );
+  }
+
+  /// Chuyển đổi Location thành Map (để lưu Firestore)
+  Map<String, dynamic> toMap() {
+    return {'latitude': latitude, 'longitude': longitude, 'address': address};
+  }
+
+  /// Tính khoảng cách giữa 2 vị trí (theo Haversine formula)
+  double distanceTo(Location other) {
+    const earthRadius = 6371; // Km
+    final lat1Rad = _toRad(latitude);
+    final lat2Rad = _toRad(other.latitude);
+    final deltaLatRad = _toRad(other.latitude - latitude);
+    final deltaLngRad = _toRad(other.longitude - longitude);
+
+    final a =
+        (1 - math.cos(deltaLatRad)) / 2 +
+        math.cos(lat1Rad) * math.cos(lat2Rad) * (1 - math.cos(deltaLngRad)) / 2;
+    final c = 2 * math.asin(math.sqrt(a.clamp(0, 1)));
+    return earthRadius * c;
+  }
+
+  static double _toRad(double degree) => degree * 3.14159265359 / 180;
+
+  @override
+  String toString() => 'Location($latitude, $longitude, $address)';
+}
 
 class DeliveryOrder {
   const DeliveryOrder({
@@ -8,11 +58,15 @@ class DeliveryOrder {
     required this.imageUrl,
     required this.senderId,
     required this.receiverId,
+    required this.senderLocation,
+    required this.receiverLocation,
     required this.createdBy,
     required this.status,
     required this.createdAt,
     required this.deadlineAt,
     this.carrierId,
+    this.pickupLocation,
+    this.deliveryLocation,
     this.canAccept,
     this.canMarkDelivered,
     this.canCancel,
@@ -27,7 +81,11 @@ class DeliveryOrder {
   final String imageUrl;
   final String senderId;
   final String receiverId;
+  final Location senderLocation; // Vị trí người gửi A
+  final Location receiverLocation; // Vị trí người nhận B
   final String? carrierId;
+  final Location? pickupLocation; // Vị trí lấy hàng thực tế (C lấy từ A)
+  final Location? deliveryLocation; // Vị trí giao hàng thực tế (C giao cho B)
   final String createdBy;
   final OrderStatus status;
   final DateTime createdAt;
@@ -47,8 +105,12 @@ class DeliveryOrder {
     String? imageUrl,
     String? senderId,
     String? receiverId,
+    Location? senderLocation,
+    Location? receiverLocation,
     String? carrierId,
     bool clearCarrier = false,
+    Location? pickupLocation,
+    Location? deliveryLocation,
     String? createdBy,
     OrderStatus? status,
     DateTime? createdAt,
@@ -67,7 +129,11 @@ class DeliveryOrder {
       imageUrl: imageUrl ?? this.imageUrl,
       senderId: senderId ?? this.senderId,
       receiverId: receiverId ?? this.receiverId,
+      senderLocation: senderLocation ?? this.senderLocation,
+      receiverLocation: receiverLocation ?? this.receiverLocation,
       carrierId: clearCarrier ? null : (carrierId ?? this.carrierId),
+      pickupLocation: pickupLocation ?? this.pickupLocation,
+      deliveryLocation: deliveryLocation ?? this.deliveryLocation,
       createdBy: createdBy ?? this.createdBy,
       status: status ?? this.status,
       createdAt: createdAt ?? this.createdAt,
