@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 import '../../services/storage_service.dart';
@@ -23,6 +24,9 @@ class ProfileScreen extends StatefulWidget {
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
+  static const String _developerFacebookUrl =
+      'https://www.facebook.com/share/1C6EfmQXL2/?mibextid=wwXIfr';
+  static const String _developerZaloQrAsset = 'maZL.jpg';
   static const List<String> _bankOptions = [
     'Vietcombank',
     'VietinBank',
@@ -145,6 +149,80 @@ class _ProfileScreenState extends State<ProfileScreen> {
               height: 120,
               child: Center(child: Text('Không thể tải ảnh xác thực.')),
             ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Đóng'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showDeveloperContactInfo(BuildContext context) async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Thông tin liên hệ của nhà phát triển'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Quét QR bên dưới để liên hệ Zalo:',
+                style: Theme.of(dialogContext).textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 12),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: SizedBox(
+                  height: 220,
+                  child: Image.asset(
+                    _developerZaloQrAsset,
+                    fit: BoxFit.contain,
+                    errorBuilder: (context, error, stackTrace) =>
+                        const SizedBox(
+                          height: 180,
+                          child: Center(
+                            child: Text('Không thể tải ảnh QR Zalo.'),
+                          ),
+                        ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Facebook:',
+                style: Theme.of(dialogContext).textTheme.titleSmall,
+              ),
+              const SizedBox(height: 4),
+              SelectableText(_developerFacebookUrl),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: () async {
+                    final uri = Uri.parse(_developerFacebookUrl);
+                    if (!await launchUrl(
+                      uri,
+                      mode: LaunchMode.externalApplication,
+                    )) {
+                      if (dialogContext.mounted) {
+                        _showUiNotice(
+                          dialogContext,
+                          'Không thể mở liên kết Facebook.',
+                        );
+                      }
+                    }
+                  },
+                  icon: const Icon(Icons.open_in_new_outlined),
+                  label: const Text('Mở Facebook'),
+                ),
+              ),
+            ],
           ),
         ),
         actions: [
@@ -796,10 +874,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             ),
                             const SizedBox(height: 8),
                             FilledButton.tonalIcon(
-                              onPressed: () => _showUiNotice(
-                                context,
-                                'Màn hình hỗ trợ đang ở chế độ UI/UX thuần.',
-                              ),
+                              onPressed: () =>
+                                  _showDeveloperContactInfo(context),
                               icon: const Icon(Icons.support_agent_outlined),
                               label: const Text('Liên hệ hỗ trợ'),
                             ),
