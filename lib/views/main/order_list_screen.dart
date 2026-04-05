@@ -774,7 +774,7 @@ class _OrderListScreenState extends State<OrderListScreen>
         );
         final cancelReasonText = _buildCancelReasonText(order);
         var summaryText = order.isLate
-            ? '${cardMessage.text}\nĐơn trễ hạn. Phí giả lập: ${order.lateFee}đ'
+            ? '${cardMessage.text}\nĐơn trễ hạn. Phí hiện tại: ${order.lateFee}đ'
             : cardMessage.text;
         if (cancelReasonText != null) {
           summaryText = '$summaryText\n$cancelReasonText';

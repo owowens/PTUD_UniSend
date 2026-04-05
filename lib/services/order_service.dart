@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
@@ -269,15 +271,33 @@ class OrderService {
             order.status == OrderStatus.cancelled) {
           continue;
         }
-        if (order.isLate) {
-          continue;
-        }
         if (!now.isAfter(order.deadlineAt)) {
+          if (order.isLate || order.lateFee != 0) {
+            updates.add(
+              doc.reference.update({
+                'is_late': false,
+                'isLate': false,
+                'late_fee': 0,
+                'lateFee': 0,
+                'updated_at': Timestamp.now(),
+                'updatedAt': Timestamp.now(),
+              }),
+            );
+          }
+
           continue;
         }
 
-        final lateMinutes = now.difference(order.deadlineAt).inMinutes;
-        final simulatedFee = (lateMinutes / 10).ceil() * 1000;
+        final overdueDuration = now.difference(order.deadlineAt);
+        final lateMinutes = math.max(
+          1,
+          (overdueDuration.inSeconds / 60).ceil(),
+        );
+        final simulatedFee = lateMinutes * 1000;
+
+        if (order.isLate && order.lateFee == simulatedFee) {
+          continue;
+        }
 
         updates.add(
           doc.reference.update({
