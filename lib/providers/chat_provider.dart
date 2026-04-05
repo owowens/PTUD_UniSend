@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../services/chat_service.dart';
 import '../services/user_session_service.dart';
@@ -29,6 +30,7 @@ class ChatProvider extends ChangeNotifier {
   bool _messagesLoading = false;
   String? _error;
   bool _sending = false;
+  bool _uploadingImage = false;
 
   String get currentUserId => _currentUserId;
   String? get selectedRoomId => _selectedRoomId;
@@ -38,6 +40,8 @@ class ChatProvider extends ChangeNotifier {
   bool get messagesLoading => _messagesLoading;
   String? get error => _error;
   bool get sending => _sending;
+  bool get uploadingImage => _uploadingImage;
+  bool get isBusy => _sending || _uploadingImage;
 
   ChatRoomModel? get selectedRoom {
     if (_selectedRoomId == null) {
@@ -93,6 +97,37 @@ class ChatProvider extends ChangeNotifier {
       );
     } finally {
       _sending = false;
+      notifyListeners();
+    }
+  }
+
+  Future<Uint8List?> pickImage({
+    ImageSource source = ImageSource.gallery,
+  }) async {
+    return _chatService.pickImage(source: source);
+  }
+
+  Future<void> sendImageMessage(Uint8List bytes) async {
+    final roomId = _selectedRoomId;
+    if (roomId == null || roomId.trim().isEmpty) {
+      throw Exception('Chưa chọn cuộc trò chuyện.');
+    }
+
+    if (_uploadingImage) {
+      return;
+    }
+
+    _uploadingImage = true;
+    notifyListeners();
+
+    try {
+      await _chatService.sendImageMessage(
+        roomId: roomId,
+        senderId: _currentUserId,
+        bytes: bytes,
+      );
+    } finally {
+      _uploadingImage = false;
       notifyListeners();
     }
   }

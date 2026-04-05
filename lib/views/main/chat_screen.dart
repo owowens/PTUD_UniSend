@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../../providers/chat_provider.dart';
@@ -74,6 +75,64 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
       );
     }
+  }
+
+  Future<void> _pickAndSendImage(ImageSource source) async {
+    final provider = context.read<ChatProvider>();
+
+    try {
+      final bytes = await provider.pickImage(source: source);
+      if (bytes == null || bytes.isEmpty) {
+        return;
+      }
+
+      await provider.sendImageMessage(bytes);
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Không gửi được ảnh: $e'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  Future<void> _showImagePickerOptions() async {
+    if (context.read<ChatProvider>().isBusy) {
+      return;
+    }
+
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('Chọn từ thư viện'),
+                onTap: () async {
+                  Navigator.of(sheetContext).pop();
+                  await _pickAndSendImage(ImageSource.gallery);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.camera_alt_outlined),
+                title: const Text('Chụp ảnh'),
+                onTap: () async {
+                  Navigator.of(sheetContext).pop();
+                  await _pickAndSendImage(ImageSource.camera);
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   Future<Map<String, dynamic>?> _loadUserProfile(
@@ -513,6 +572,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             controller: _controller,
                             textInputAction: TextInputAction.send,
                             onSubmitted: (_) => _sendMessage(),
+                            enabled: !chatProvider.isBusy,
                             decoration: const InputDecoration(
                               hintText: 'Nhập tin nhắn...',
                               border: InputBorder.none,
@@ -520,9 +580,24 @@ class _ChatScreenState extends State<ChatScreen> {
                             ),
                           ),
                         ),
+                        IconButton(
+                          tooltip: 'Gửi ảnh',
+                          onPressed: chatProvider.isBusy
+                              ? null
+                              : _showImagePickerOptions,
+                          icon: chatProvider.uploadingImage
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.image_outlined),
+                        ),
                         IconButton.filled(
                           tooltip: 'Gửi',
-                          onPressed: chatProvider.sending ? null : _sendMessage,
+                          onPressed: chatProvider.isBusy ? null : _sendMessage,
                           icon: chatProvider.sending
                               ? const SizedBox(
                                   width: 18,
@@ -688,7 +763,7 @@ class _MessagesPanel extends StatelessWidget {
     final isMe = message.senderId == currentUserId;
     final displayName = _displayName(profile, message.senderId);
     final avatarUrl = _avatarUrl(profile);
-    final content = ChatBubble(text: message.content, isMe: isMe);
+    final content = _buildMessageContent(context, message, isMe);
 
     final header = Row(
       mainAxisSize: MainAxisSize.min,
@@ -720,6 +795,36 @@ class _MessagesPanel extends StatelessWidget {
         child: body,
       ),
     );
+  }
+
+  Widget _buildMessageContent(
+    BuildContext context,
+    ChatMessageModel message,
+    bool isMe,
+  ) {
+    if (message.type == 'image') {
+      return ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 280, maxHeight: 320),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Image.network(
+            message.content,
+            fit: BoxFit.cover,
+            errorBuilder: (context, error, stackTrace) {
+              return Container(
+                width: 220,
+                height: 140,
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                alignment: Alignment.center,
+                child: const Text('Ảnh lỗi'),
+              );
+            },
+          ),
+        ),
+      );
+    }
+
+    return ChatBubble(text: message.content, isMe: isMe);
   }
 
   @override

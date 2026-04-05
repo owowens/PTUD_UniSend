@@ -1,4 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class ChatRoomModel {
   const ChatRoomModel({
@@ -102,12 +105,88 @@ class ChatService {
     : _firestore = firestore ?? FirebaseFirestore.instance;
 
   final FirebaseFirestore _firestore;
+  final ImagePicker _imagePicker = ImagePicker();
 
   static const String chatRoomsCollection = 'chat_rooms';
   static const String messagesCollection = 'messages';
 
   CollectionReference<Map<String, dynamic>> get _chatRoomsRef =>
       _firestore.collection(chatRoomsCollection);
+
+  SupabaseClient? _tryGetSupabaseClient() {
+    try {
+      return Supabase.instance.client;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<Uint8List?> pickImage({
+    ImageSource source = ImageSource.gallery,
+    int imageQuality = 85,
+  }) async {
+    try {
+      final picked = await _imagePicker.pickImage(
+        source: source,
+        imageQuality: imageQuality,
+      );
+      if (picked == null) {
+        debugPrint('[ChatService] pickImage cancelled by user');
+        return null;
+      }
+
+      final bytes = await picked.readAsBytes();
+      debugPrint('[ChatService] pickImage success, bytes=${bytes.length}');
+      return bytes;
+    } catch (error, stackTrace) {
+      debugPrint('[ChatService] pickImage error: $error\n$stackTrace');
+      rethrow;
+    }
+  }
+
+  Future<String> uploadImageToSupabase({
+    required String roomId,
+    required Uint8List bytes,
+  }) async {
+    final normalizedRoomId = roomId.trim();
+    if (normalizedRoomId.isEmpty) {
+      throw Exception('roomId không hợp lệ để upload ảnh.');
+    }
+    if (bytes.isEmpty) {
+      throw Exception('Ảnh rỗng, không thể upload.');
+    }
+
+    try {
+      final supabase = _tryGetSupabaseClient();
+      if (supabase == null) {
+        throw Exception('Supabase chưa được khởi tạo.');
+      }
+
+      final fileName = '${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final path = 'chat_images/$normalizedRoomId/$fileName';
+
+      await supabase.storage
+          .from('orders')
+          .uploadBinary(
+            path,
+            bytes,
+            fileOptions: const FileOptions(
+              upsert: false,
+              cacheControl: '3600',
+              contentType: 'image/jpeg',
+            ),
+          );
+
+      final publicUrl = supabase.storage.from('orders').getPublicUrl(path);
+      debugPrint('[ChatService] uploadImageToSupabase success: $publicUrl');
+      return publicUrl;
+    } catch (error, stackTrace) {
+      debugPrint(
+        '[ChatService] uploadImageToSupabase error: $error\n$stackTrace',
+      );
+      rethrow;
+    }
+  }
 
   Stream<List<ChatRoomModel>> watchRoomsByUser(String userId) {
     final normalizedUserId = userId.trim();
@@ -226,6 +305,59 @@ class ChatService {
         'updated_at': now,
       });
     });
+  }
+
+  Future<void> sendImageMessage({
+    required String roomId,
+    required String senderId,
+    required Uint8List bytes,
+  }) async {
+    final normalizedRoomId = roomId.trim();
+    final normalizedSenderId = senderId.trim();
+
+    if (normalizedRoomId.isEmpty) {
+      throw Exception('roomId không hợp lệ.');
+    }
+    if (normalizedSenderId.isEmpty) {
+      throw Exception('senderId không hợp lệ.');
+    }
+
+    try {
+      final imageUrl = await uploadImageToSupabase(
+        roomId: normalizedRoomId,
+        bytes: bytes,
+      );
+
+      final now = Timestamp.now();
+      final messageRef = _chatRoomsRef
+          .doc(normalizedRoomId)
+          .collection(messagesCollection)
+          .doc();
+      final roomRef = _chatRoomsRef.doc(normalizedRoomId);
+
+      await _firestore.runTransaction((transaction) async {
+        transaction.set(messageRef, {
+          'id': messageRef.id,
+          'room_id': normalizedRoomId,
+          'sender_id': normalizedSenderId,
+          'content': imageUrl,
+          'type': 'image',
+          'created_at': now,
+        });
+
+        transaction.update(roomRef, {
+          'last_message': '[Image]',
+          'last_message_at': now,
+          'updated_at': now,
+        });
+      });
+      debugPrint(
+        '[ChatService] sendImageMessage success, room=$normalizedRoomId',
+      );
+    } catch (error, stackTrace) {
+      debugPrint('[ChatService] sendImageMessage error: $error\n$stackTrace');
+      rethrow;
+    }
   }
 
   Future<void> leaveRoom({
