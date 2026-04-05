@@ -31,6 +31,7 @@ class OrderCard extends StatefulWidget {
     this.summaryText,
     this.summaryIcon = Icons.info_outline_rounded,
     this.summaryColor,
+    this.extraContent,
     this.actions = const <OrderCardAction>[],
   });
 
@@ -44,6 +45,7 @@ class OrderCard extends StatefulWidget {
   final String? summaryText;
   final IconData summaryIcon;
   final Color? summaryColor;
+  final Widget? extraContent;
   final List<OrderCardAction> actions;
 
   @override
@@ -162,11 +164,17 @@ class _OrderCardState extends State<OrderCard> {
                   ),
                 ),
                 const SizedBox(width: 12),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: SizedBox(
-                    width: 72,
-                    height: 72,
+                Container(
+                  width: 72,
+                  height: 72,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: colorScheme.outlineVariant,
+                      width: 1.4,
+                    ),
+                  ),
+                  child: ClipOval(
                     child: FutureBuilder<String?>(
                       future: _resolvedImageUrlFuture,
                       builder: (context, snapshot) {
@@ -224,6 +232,10 @@ class _OrderCardState extends State<OrderCard> {
                   ],
                 ),
               ),
+            ],
+            if (widget.extraContent != null) ...[
+              const SizedBox(height: 12),
+              widget.extraContent!,
             ],
             if (widget.actions.isNotEmpty) ...[
               const SizedBox(height: 14),

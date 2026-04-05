@@ -55,6 +55,7 @@ class _MapScreenState extends State<MapScreen> {
   final mapController = MapController();
   final locationService = LocationService();
   final firestoreService = FirestoreService();
+  final storageService = StorageService();
 
   // State
   bool showNearbyPanel = true;
@@ -62,6 +63,7 @@ class _MapScreenState extends State<MapScreen> {
   bool isCameraAnimating = false;
   bool hasMapTileError = false;
   Timer? _mapTileErrorTimer;
+  Timer? _nearbyRefreshTimer;
   int _mapTileErrorCount = 0;
   String? _lastMapTileError;
   bool isLoadingNearbyOrders = false;
@@ -70,13 +72,18 @@ class _MapScreenState extends State<MapScreen> {
   Location? currentLocation;
   Location? lastNearbyQueryLocation;
   DateTime? lastNearbyQueryAt;
+  String? selectedNearbyOrderId;
   StreamSubscription<Location?>? locationSubscription;
   List<DeliveryOrder> nearbyOrders = const [];
+  final Map<String, String?> _resolvedOrderImageUrls = <String, String?>{};
+  final Map<String, Future<String?>> _pendingOrderImageUrlFutures =
+      <String, Future<String?>>{};
 
   @override
   void initState() {
     super.initState();
     _initLocation();
+    _startNearbyAutoRefresh();
   }
 
   Future<void> _initLocation() async {
@@ -239,6 +246,18 @@ class _MapScreenState extends State<MapScreen> {
         });
   }
 
+  void _startNearbyAutoRefresh() {
+    _nearbyRefreshTimer?.cancel();
+    _nearbyRefreshTimer = Timer.periodic(const Duration(seconds: 18), (_) {
+      final location = currentLocation;
+      if (!mounted || location == null) {
+        return;
+      }
+
+      _loadNearbyOrders(location, force: true);
+    });
+  }
+
   Future<void> _loadNearbyOrders(
     Location location, {
     bool force = false,
@@ -278,6 +297,9 @@ class _MapScreenState extends State<MapScreen> {
           isRefreshingNearbyOrders = false;
           lastNearbyQueryLocation = location;
           lastNearbyQueryAt = DateTime.now();
+          selectedNearbyOrderId = null;
+          _resolvedOrderImageUrls.clear();
+          _pendingOrderImageUrlFutures.clear();
         });
         return;
       }
@@ -286,6 +308,7 @@ class _MapScreenState extends State<MapScreen> {
         location,
         radiusKm: nearbySearchRadiusKm,
       );
+      final validImageKeys = orders.map(_orderImageCacheKey).toSet();
       if (!mounted) return;
 
       setState(() {
@@ -294,6 +317,16 @@ class _MapScreenState extends State<MapScreen> {
         isRefreshingNearbyOrders = false;
         lastNearbyQueryLocation = location;
         lastNearbyQueryAt = DateTime.now();
+        _resolvedOrderImageUrls.removeWhere(
+          (key, _) => !validImageKeys.contains(key),
+        );
+        _pendingOrderImageUrlFutures.removeWhere(
+          (key, _) => !validImageKeys.contains(key),
+        );
+        if (selectedNearbyOrderId != null &&
+            !orders.any((order) => order.id == selectedNearbyOrderId)) {
+          selectedNearbyOrderId = null;
+        }
       });
     } catch (e) {
       if (!mounted) return;
@@ -304,6 +337,9 @@ class _MapScreenState extends State<MapScreen> {
         isRefreshingNearbyOrders = false;
         lastNearbyQueryLocation = location;
         lastNearbyQueryAt = DateTime.now();
+        selectedNearbyOrderId = null;
+        _resolvedOrderImageUrls.clear();
+        _pendingOrderImageUrlFutures.clear();
       });
       debugPrint('Failed to load nearby orders: $e');
     }
@@ -338,6 +374,210 @@ class _MapScreenState extends State<MapScreen> {
     }
 
     return nearestDistance.isFinite ? nearestDistance : null;
+  }
+
+  List<DeliveryOrder> get _sortedNearbyOrders {
+    final selectedId = selectedNearbyOrderId;
+    if (selectedId == null || selectedId.trim().isEmpty) {
+      return nearbyOrders;
+    }
+
+    final selectedIndex = nearbyOrders.indexWhere(
+      (order) => order.id == selectedId,
+    );
+    if (selectedIndex <= 0) {
+      return nearbyOrders;
+    }
+
+    final selectedOrder = nearbyOrders[selectedIndex];
+    return <DeliveryOrder>[
+      selectedOrder,
+      ...nearbyOrders.where((order) => order.id != selectedId),
+    ];
+  }
+
+  String _orderImageCacheKey(DeliveryOrder order) {
+    final id = order.id.trim();
+    if (id.isNotEmpty) {
+      return id;
+    }
+    return '${order.imageUrl.trim()}::${order.createdAt.millisecondsSinceEpoch}';
+  }
+
+  Future<String?> _resolveOrderMarkerImageUrl(DeliveryOrder order) {
+    final key = _orderImageCacheKey(order);
+
+    if (_resolvedOrderImageUrls.containsKey(key)) {
+      return Future<String?>.value(_resolvedOrderImageUrls[key]);
+    }
+
+    final pending = _pendingOrderImageUrlFutures[key];
+    if (pending != null) {
+      return pending;
+    }
+
+    final future = storageService.resolveStoredImageUrl(order.imageUrl).then((
+      resolved,
+    ) {
+      if (mounted) {
+        setState(() {
+          _resolvedOrderImageUrls[key] = resolved;
+          _pendingOrderImageUrlFutures.remove(key);
+        });
+      } else {
+        _pendingOrderImageUrlFutures.remove(key);
+      }
+      return resolved;
+    });
+
+    _pendingOrderImageUrlFutures[key] = future;
+    return future;
+  }
+
+  void _focusOrderInPanel(DeliveryOrder order) {
+    setState(() {
+      selectedNearbyOrderId = order.id;
+      showNearbyPanel = true;
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _animatePanelTo(panelMidSize);
+      }
+    });
+  }
+
+  List<Marker> _buildMapMarkers() {
+    final markers = <Marker>[];
+    final location = currentLocation;
+
+    if (location != null) {
+      markers.add(
+        _buildMarker(
+          LatLng(location.latitude, location.longitude),
+          'Bạn',
+          Colors.blue,
+          isDelivery: true,
+        ),
+      );
+    }
+
+    for (final order in nearbyOrders) {
+      final pickupLocation = order.pickupLocation ?? order.senderLocation;
+      final deliveryLocation = order.deliveryLocation ?? order.receiverLocation;
+
+      markers.add(
+        _buildOrderLocationMarker(
+          point: LatLng(pickupLocation.latitude, pickupLocation.longitude),
+          order: order,
+          tag: 'Nhận',
+          tagColor: Colors.green,
+        ),
+      );
+      markers.add(
+        _buildOrderLocationMarker(
+          point: LatLng(deliveryLocation.latitude, deliveryLocation.longitude),
+          order: order,
+          tag: 'Giao',
+          tagColor: Colors.red,
+        ),
+      );
+    }
+
+    return markers;
+  }
+
+  Marker _buildOrderLocationMarker({
+    required LatLng point,
+    required DeliveryOrder order,
+    required String tag,
+    required Color tagColor,
+  }) {
+    return Marker(
+      point: point,
+      width: 90,
+      height: 120,
+      alignment: Alignment.bottomCenter,
+      child: GestureDetector(
+        onTap: () => _focusOrderInPanel(order),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              decoration: BoxDecoration(
+                color: tagColor,
+                borderRadius: BorderRadius.circular(99),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              child: Text(
+                tag,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Container(
+              width: 62,
+              height: 62,
+              padding: const EdgeInsets.all(2),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+                border: Border.all(color: tagColor, width: 2),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withAlpha(35),
+                    blurRadius: 7,
+                    spreadRadius: 1,
+                  ),
+                ],
+              ),
+              child: ClipOval(
+                child: FutureBuilder<String?>(
+                  future: _resolveOrderMarkerImageUrl(order),
+                  builder: (context, snapshot) {
+                    final imageUrl = snapshot.data?.trim();
+                    if (imageUrl != null && imageUrl.isNotEmpty) {
+                      return Image.network(
+                        imageUrl,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) {
+                          return Container(
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.surfaceContainerHighest,
+                            child: const Icon(Icons.image_not_supported_outlined),
+                          );
+                        },
+                      );
+                    }
+
+                    if (snapshot.connectionState == ConnectionState.waiting) {
+                      return const Center(
+                        child: SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      );
+                    }
+
+                    return Container(
+                      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                      child: const Icon(Icons.inventory_2_outlined),
+                    );
+                  },
+                ),
+              ),
+            ),
+            Icon(Icons.location_on, color: tagColor, size: 20),
+          ],
+        ),
+      ),
+    );
   }
 
   void _handleMapError(Object error) {
@@ -411,8 +651,8 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  void _openCreateOrder() {
-    Navigator.of(context).push(
+  Future<void> _openCreateOrder() async {
+    final created = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         fullscreenDialog: true,
         builder: (_) => _CreateOrderPage(
@@ -421,12 +661,20 @@ class _MapScreenState extends State<MapScreen> {
         ),
       ),
     );
+
+    if (!mounted || created != true) return;
+
+    final location = currentLocation;
+    if (location != null) {
+      await _loadNearbyOrders(location, force: true);
+    }
   }
 
   @override
   void dispose() {
     locationSubscription?.cancel();
     _mapTileErrorTimer?.cancel();
+    _nearbyRefreshTimer?.cancel();
     panelController.dispose();
     super.dispose();
   }
@@ -454,8 +702,7 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Widget _buildMapLayer(LatLng center) {
-    final courierLat = currentLocation?.latitude ?? defaultLat + 0.005;
-    final courierLng = currentLocation?.longitude ?? defaultLng + 0.005;
+    final markers = _buildMapMarkers();
 
     return Stack(
       fit: StackFit.expand,
@@ -490,24 +737,7 @@ class _MapScreenState extends State<MapScreen> {
                   _handleMapError(error),
             ),
             MarkerLayer(
-              markers: [
-                _buildMarker(LatLng(defaultLat, defaultLng), 'A', Colors.green),
-                _buildMarker(
-                  LatLng(defaultLat + 0.01, defaultLng + 0.01),
-                  'B',
-                  Colors.red,
-                ),
-                _buildMarker(
-                  LatLng(courierLat, courierLng),
-                  currentLocation == null ? 'C' : 'Bạn',
-                  Colors.blue,
-                  isDelivery: true,
-                ),
-              ],
-            ),
-            const SimpleAttributionWidget(
-              source: Text('© OpenStreetMap'),
-              alignment: Alignment.bottomLeft,
+              markers: markers,
             ),
           ],
         ),
@@ -619,6 +849,7 @@ class _MapScreenState extends State<MapScreen> {
   Widget _buildNearbyPanel() {
     final location = currentLocation;
     final panelLocation = location;
+    final sortedOrders = _sortedNearbyOrders;
     final bottomPadding = MediaQuery.of(context).padding.bottom + 24.0;
 
     return DraggableScrollableSheet(
@@ -705,16 +936,19 @@ class _MapScreenState extends State<MapScreen> {
                         delegate: SliverChildBuilderDelegate(
                           (context, i) => Padding(
                             padding: EdgeInsets.only(
-                              bottom: i == nearbyOrders.length - 1 ? 0 : 8,
+                              bottom: i == sortedOrders.length - 1 ? 0 : 8,
                             ),
                             child: _NearbyOrderCard(
-                              order: nearbyOrders[i],
+                              order: sortedOrders[i],
                               userLocation: panelLocation!,
+                              isHighlighted:
+                                  sortedOrders[i].id == selectedNearbyOrderId,
+                              onTap: () => _focusOrderInPanel(sortedOrders[i]),
                               onAccept: () =>
-                                  _acceptNearbyOrder(nearbyOrders[i]),
+                                  _acceptNearbyOrder(sortedOrders[i]),
                             ),
                           ),
-                          childCount: nearbyOrders.length,
+                          childCount: sortedOrders.length,
                         ),
                       ),
                     ),
@@ -988,12 +1222,16 @@ class _NearbyOrderCard extends StatelessWidget {
   _NearbyOrderCard({
     required this.order,
     required this.userLocation,
+    required this.onTap,
     required this.onAccept,
+    this.isHighlighted = false,
   });
 
   final DeliveryOrder order;
   final Location userLocation;
+  final VoidCallback onTap;
   final VoidCallback onAccept;
+  final bool isHighlighted;
   final StorageService _storageService = StorageService();
 
   String _formatLocation(Location location) {
@@ -1129,76 +1367,87 @@ class _NearbyOrderCard extends StatelessWidget {
     );
     return Card(
       margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: () => _openOrderInfoSheet(context),
-                  child: Container(
-                    width: 64,
-                    height: 64,
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          scheme.secondaryContainer,
-                          scheme.primaryContainer,
-                        ],
+      color: isHighlighted ? scheme.primaryContainer.withAlpha(70) : null,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: isHighlighted
+            ? BorderSide(color: scheme.primary, width: 1.3)
+            : BorderSide.none,
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: () => _openOrderInfoSheet(context),
+                    child: Container(
+                      width: 64,
+                      height: 64,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            scheme.secondaryContainer,
+                            scheme.primaryContainer,
+                          ],
+                        ),
                       ),
-                    ),
-                    child: Icon(
-                      Icons.inventory_2_outlined,
-                      color: scheme.onPrimaryContainer,
+                      child: Icon(
+                        Icons.inventory_2_outlined,
+                        color: scheme.onPrimaryContainer,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    order.title,
-                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w700,
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      order.title,
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text('Lấy hàng: ${_formatLocation(order.senderLocation)}'),
-                  const SizedBox(height: 2),
-                  Text('Giao hàng: ${_formatLocation(order.receiverLocation)}'),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Cách điểm giao: ${deliveryDistanceKm.toStringAsFixed(2)} km',
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Cách điểm lấy: ${pickupDistanceKm.toStringAsFixed(2)} km',
-                  ),
-                  const SizedBox(height: 8),
-                  Chip(
-                    visualDensity: VisualDensity.compact,
-                    label: Text(order.status.name),
-                  ),
-                ],
+                    const SizedBox(height: 4),
+                    Text('Lấy hàng: ${_formatLocation(order.senderLocation)}'),
+                    const SizedBox(height: 2),
+                    Text('Giao hàng: ${_formatLocation(order.receiverLocation)}'),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Cách điểm giao: ${deliveryDistanceKm.toStringAsFixed(2)} km',
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Cách điểm lấy: ${pickupDistanceKm.toStringAsFixed(2)} km',
+                    ),
+                    const SizedBox(height: 8),
+                    Chip(
+                      visualDensity: VisualDensity.compact,
+                      label: Text(order.status.name),
+                    ),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(width: 8),
-            SizedBox(
-              width: 84,
-              child: FilledButton.tonal(
-                onPressed: onAccept,
-                child: const Text('Nhận'),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 84,
+                child: FilledButton.tonal(
+                  onPressed: onAccept,
+                  child: const Text('Nhận'),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -1576,7 +1825,7 @@ class _CreateOrderFormState extends State<_CreateOrderForm> {
       if (!mounted) return;
 
       _showMsg('Tạo đơn thành công');
-      Navigator.of(context).pop();
+      Navigator.of(context).pop(true);
     } catch (e) {
       if (mounted) _showMsg('Lỗi: $e');
     } finally {
@@ -1755,7 +2004,7 @@ class _CreateOrderFormState extends State<_CreateOrderForm> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Địa chỉ giao',
+                  'Người nhận',
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
                 const SizedBox(height: 10),
@@ -2111,10 +2360,6 @@ class _MapLocationPickerSheetState extends State<_MapLocationPickerSheet> {
                       if (!mounted || hasTileError) return;
                       setState(() => hasTileError = true);
                     },
-                  ),
-                  const SimpleAttributionWidget(
-                    source: Text('© OpenStreetMap'),
-                    alignment: Alignment.bottomLeft,
                   ),
                 ],
               ),

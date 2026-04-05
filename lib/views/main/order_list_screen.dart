@@ -10,6 +10,7 @@ import '../../providers/order_provider.dart';
 import '../../services/firestore_service.dart';
 import '../../services/location_service.dart';
 import '../../services/order_service.dart';
+import '../../services/storage_service.dart';
 import '../../services/user_session_service.dart';
 import '../../widgets/common/order_card.dart';
 
@@ -123,15 +124,25 @@ class _OrderListScreenState extends State<OrderListScreen>
 
   late final TabController _tabController;
   final FirestoreService _firestoreService = FirestoreService();
+  final LocationService _locationService = LocationService();
+  final StorageService _storageService = StorageService();
+  Location? _currentDeviceLocation;
+  StreamSubscription<Location?>? _deviceLocationSubscription;
+  final Map<String, String?> _resolvedOrderMapImageUrls =
+      <String, String?>{};
+  final Map<String, Future<String?>> _pendingOrderMapImageFutures =
+      <String, Future<String?>>{};
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: _tabs.length, vsync: this);
+    _startLocationTracking();
   }
 
   @override
   void dispose() {
+    _deviceLocationSubscription?.cancel();
     _tabController.dispose();
     super.dispose();
   }
@@ -139,6 +150,86 @@ class _OrderListScreenState extends State<OrderListScreen>
   void _showMessage(String message) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  Future<void> _startLocationTracking() async {
+    final enabled = await _locationService.isLocationServiceEnabled();
+    if (!enabled) {
+      return;
+    }
+
+    var hasPermission = await _locationService.hasLocationPermission();
+    if (!hasPermission) {
+      hasPermission = await _locationService.requestLocationPermission();
+    }
+
+    if (!mounted || !hasPermission) {
+      return;
+    }
+
+    var location = await _locationService.getCurrentLocation();
+    location ??= await _locationService.getLastKnownLocation();
+
+    if (mounted && location != null) {
+      setState(() => _currentDeviceLocation = location);
+    }
+
+    _deviceLocationSubscription?.cancel();
+    _deviceLocationSubscription = _locationService
+        .watchLocation(distanceFilter: 20)
+        .listen((locationUpdate) {
+          if (!mounted || locationUpdate == null) {
+            return;
+          }
+
+          setState(() => _currentDeviceLocation = locationUpdate);
+        });
+  }
+
+  String _orderImageCacheKey(DeliveryOrder order) {
+    final id = order.id.trim();
+    if (id.isNotEmpty) {
+      return id;
+    }
+    return '${order.imageUrl.trim()}::${order.createdAt.millisecondsSinceEpoch}';
+  }
+
+  Future<String?> _resolveOrderMapImageUrl(DeliveryOrder order) {
+    final key = _orderImageCacheKey(order);
+
+    if (_resolvedOrderMapImageUrls.containsKey(key)) {
+      return Future<String?>.value(_resolvedOrderMapImageUrls[key]);
+    }
+
+    final pending = _pendingOrderMapImageFutures[key];
+    if (pending != null) {
+      return pending;
+    }
+
+    final future = _storageService.resolveStoredImageUrl(order.imageUrl).then((
+      resolved,
+    ) {
+      _resolvedOrderMapImageUrls[key] = resolved;
+      _pendingOrderMapImageFutures.remove(key);
+      return resolved;
+    });
+
+    _pendingOrderMapImageFutures[key] = future;
+    return future;
+  }
+
+  Widget _buildTrackingMap(DeliveryOrder order) {
+    final current = _currentDeviceLocation;
+    final currentLocationText = current == null
+        ? 'Vị trí hiện tại: chưa bật GPS.'
+        : 'Vị trí hiện tại: ${_formatLocationForCard(current)}';
+
+    return _DeliveryTrackingMap(
+      order: order,
+      currentDeviceLocation: current,
+      currentLocationText: currentLocationText,
+      resolveImageUrl: () => _resolveOrderMapImageUrl(order),
     );
   }
 
@@ -793,6 +884,9 @@ class _OrderListScreenState extends State<OrderListScreen>
           summaryIcon: cardMessage.icon,
           summaryColor: cardMessage.color,
           summaryText: summaryText,
+          extraContent: order.status == OrderStatus.waitingDelivery
+              ? _buildTrackingMap(order)
+              : null,
           actions: _buildActions(
             order,
             permissions,
@@ -850,6 +944,345 @@ class _OrderListScreenState extends State<OrderListScreen>
             )
             .toList(),
       ),
+    );
+  }
+}
+
+class _DeliveryTrackingMap extends StatefulWidget {
+  const _DeliveryTrackingMap({
+    required this.order,
+    required this.currentDeviceLocation,
+    required this.currentLocationText,
+    required this.resolveImageUrl,
+  });
+
+  final DeliveryOrder order;
+  final Location? currentDeviceLocation;
+  final String currentLocationText;
+  final Future<String?> Function() resolveImageUrl;
+
+  @override
+  State<_DeliveryTrackingMap> createState() => _DeliveryTrackingMapState();
+}
+
+class _DeliveryTrackingMapState extends State<_DeliveryTrackingMap> {
+  static const String _tileUrlTemplate =
+      'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+  static const double _minZoom = 5;
+  static const double _maxZoom = 18;
+  static const double _defaultZoom = 13.5;
+
+  final MapController _mapController = MapController();
+  late Future<String?> _imageUrlFuture;
+  double _currentZoom = _defaultZoom;
+
+  @override
+  void initState() {
+    super.initState();
+    _imageUrlFuture = widget.resolveImageUrl();
+  }
+
+  @override
+  void didUpdateWidget(covariant _DeliveryTrackingMap oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.order.id != widget.order.id ||
+        oldWidget.order.imageUrl != widget.order.imageUrl) {
+      _imageUrlFuture = widget.resolveImageUrl();
+      _currentZoom = _defaultZoom;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) {
+          return;
+        }
+
+        try {
+          _mapController.move(_computeCenter(), _defaultZoom);
+        } catch (_) {
+          // Map may not be attached yet; ignore and keep initial options.
+        }
+      });
+    }
+  }
+
+  Location get _pickupLocation =>
+      widget.order.pickupLocation ?? widget.order.senderLocation;
+
+  Location get _deliveryLocation =>
+      widget.order.deliveryLocation ?? widget.order.receiverLocation;
+
+  LatLng _computeCenter() {
+    final points = <Location>[_pickupLocation, _deliveryLocation];
+    final current = widget.currentDeviceLocation;
+    if (current != null) {
+      points.add(current);
+    }
+
+    final avgLat =
+        points.fold<double>(0, (sum, item) => sum + item.latitude) /
+        points.length;
+    final avgLng =
+        points.fold<double>(0, (sum, item) => sum + item.longitude) /
+        points.length;
+    return LatLng(avgLat, avgLng);
+  }
+
+  void _zoomBy(double delta) {
+    final center = _mapController.camera.center;
+    final targetZoom = (_currentZoom + delta).clamp(_minZoom, _maxZoom);
+    _mapController.move(center, targetZoom);
+    setState(() => _currentZoom = targetZoom);
+  }
+
+  void _centerToCurrentLocation() {
+    final current = widget.currentDeviceLocation;
+    if (current == null) {
+      return;
+    }
+
+    final targetZoom = _currentZoom < 15 ? 15.0 : _currentZoom;
+    _mapController.move(
+      LatLng(current.latitude, current.longitude),
+      targetZoom,
+    );
+    setState(() => _currentZoom = targetZoom);
+  }
+
+  Marker _buildOrderImageMarker({
+    required LatLng point,
+    required String tag,
+    required Color tagColor,
+    required String? imageUrl,
+  }) {
+    return Marker(
+      point: point,
+      width: 90,
+      height: 112,
+      alignment: Alignment.bottomCenter,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            decoration: BoxDecoration(
+              color: tagColor,
+              borderRadius: BorderRadius.circular(99),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            child: Text(
+              tag,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Container(
+            width: 54,
+            height: 54,
+            padding: const EdgeInsets.all(2),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white,
+              border: Border.all(color: tagColor, width: 2),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withAlpha(35),
+                  blurRadius: 6,
+                  spreadRadius: 1,
+                ),
+              ],
+            ),
+            child: ClipOval(
+              child: (imageUrl != null && imageUrl.isNotEmpty)
+                  ? Image.network(
+                      imageUrl,
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) {
+                        return Container(
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.surfaceContainerHighest,
+                          child: const Icon(Icons.image_not_supported_outlined),
+                        );
+                      },
+                    )
+                  : Container(
+                      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                      child: const Icon(Icons.inventory_2_outlined),
+                    ),
+            ),
+          ),
+          Icon(Icons.location_on, color: tagColor, size: 18),
+        ],
+      ),
+    );
+  }
+
+  Marker _buildCurrentLocationMarker(LatLng point) {
+    return Marker(
+      point: point,
+      width: 52,
+      height: 68,
+      alignment: Alignment.bottomCenter,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 20,
+            height: 20,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.blue,
+              border: Border.all(color: Colors.white, width: 2),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withAlpha(30),
+                  blurRadius: 5,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 3),
+          const Text(
+            'Bạn',
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              color: Colors.blue,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final center = _computeCenter();
+    final pickup = _pickupLocation;
+    final delivery = _deliveryLocation;
+    final current = widget.currentDeviceLocation;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Bản đồ theo dõi đơn', style: Theme.of(context).textTheme.labelLarge),
+        const SizedBox(height: 8),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: SizedBox(
+            height: 212,
+            child: FutureBuilder<String?>(
+              future: _imageUrlFuture,
+              builder: (context, snapshot) {
+                final imageUrl = snapshot.data?.trim();
+                return Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    FlutterMap(
+                      mapController: _mapController,
+                      options: MapOptions(
+                        initialCenter: center,
+                        initialZoom: _defaultZoom,
+                        minZoom: _minZoom,
+                        maxZoom: _maxZoom,
+                        onPositionChanged: (position, hasGesture) {
+                          final zoom = (position.zoom ?? _currentZoom).clamp(
+                            _minZoom,
+                            _maxZoom,
+                          );
+                          if ((zoom - _currentZoom).abs() > 0.001) {
+                            setState(() => _currentZoom = zoom);
+                          }
+                        },
+                        interactionOptions: const InteractionOptions(
+                          flags:
+                              InteractiveFlag.drag |
+                              InteractiveFlag.flingAnimation |
+                              InteractiveFlag.pinchMove |
+                              InteractiveFlag.pinchZoom |
+                              InteractiveFlag.doubleTapZoom,
+                        ),
+                        backgroundColor: const Color(0xFFE9EEF2),
+                      ),
+                      children: [
+                        TileLayer(
+                          urlTemplate: _tileUrlTemplate,
+                          userAgentPackageName: 'com.example.unisend',
+                          tileProvider: NetworkTileProvider(
+                            headers: {'User-Agent': 'UniSend/1.0'},
+                          ),
+                          maxNativeZoom: 19,
+                        ),
+                        MarkerLayer(
+                          markers: [
+                            _buildOrderImageMarker(
+                              point: LatLng(pickup.latitude, pickup.longitude),
+                              tag: 'Nhận',
+                              tagColor: Colors.green,
+                              imageUrl: imageUrl,
+                            ),
+                            _buildOrderImageMarker(
+                              point: LatLng(delivery.latitude, delivery.longitude),
+                              tag: 'Giao',
+                              tagColor: Colors.red,
+                              imageUrl: imageUrl,
+                            ),
+                            if (current != null)
+                              _buildCurrentLocationMarker(
+                                LatLng(current.latitude, current.longitude),
+                              ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    Positioned(
+                      top: 8,
+                      right: 8,
+                      child: Material(
+                        color: Theme.of(context).colorScheme.surface.withAlpha(225),
+                        borderRadius: BorderRadius.circular(12),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              onPressed: () => _zoomBy(1),
+                              icon: const Icon(Icons.add),
+                              tooltip: 'Phóng to',
+                            ),
+                            const SizedBox(height: 2),
+                            IconButton(
+                              onPressed: () => _zoomBy(-1),
+                              icon: const Icon(Icons.remove),
+                              tooltip: 'Thu nhỏ',
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      right: 8,
+                      bottom: 8,
+                      child: FloatingActionButton.small(
+                        heroTag: 'tracking_map_my_location_${widget.order.id}',
+                        onPressed:
+                            current == null ? null : _centerToCurrentLocation,
+                        tooltip: 'Vị trí hiện tại',
+                        child: const Icon(Icons.my_location_outlined),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          widget.currentLocationText,
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ],
     );
   }
 }
