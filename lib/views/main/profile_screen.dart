@@ -983,6 +983,13 @@ class _ProfileEditSheetState extends State<_ProfileEditSheet> {
     super.dispose();
   }
 
+  String? _requiredFieldValidator(String? value, String fieldLabel) {
+    if (value == null || value.trim().isEmpty) {
+      return 'Vui lòng nhập $fieldLabel';
+    }
+    return null;
+  }
+
   Future<void> _pickBirthday() async {
     final now = DateTime.now();
     final initialDate =
@@ -1054,6 +1061,8 @@ class _ProfileEditSheetState extends State<_ProfileEditSheet> {
               TextFormField(
                 controller: _accountIdController,
                 decoration: const InputDecoration(labelText: 'Mã tài khoản'),
+                validator: (value) =>
+                    _requiredFieldValidator(value, 'mã tài khoản'),
               ),
               const SizedBox(height: 12),
               TextFormField(
@@ -1064,7 +1073,7 @@ class _ProfileEditSheetState extends State<_ProfileEditSheet> {
                   final normalized =
                       value?.replaceAll(RegExp(r'\s+'), '') ?? '';
                   if (normalized.isEmpty) {
-                    return null;
+                    return 'Vui lòng nhập số điện thoại';
                   }
                   if (!RegExp(r'^\d{10}$').hasMatch(normalized)) {
                     return 'Số điện thoại phải gồm 10 chữ số';
@@ -1081,12 +1090,15 @@ class _ProfileEditSheetState extends State<_ProfileEditSheet> {
                   suffixIcon: Icon(Icons.calendar_today_outlined),
                 ),
                 onTap: _pickBirthday,
+                validator: (value) =>
+                    _requiredFieldValidator(value, 'ngày sinh'),
               ),
               const SizedBox(height: 12),
               TextFormField(
                 controller: _addressController,
                 decoration: const InputDecoration(labelText: 'Địa chỉ'),
                 maxLines: 2,
+                validator: (value) => _requiredFieldValidator(value, 'địa chỉ'),
               ),
               const SizedBox(height: 16),
               SizedBox(
