@@ -28,11 +28,18 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true
 
   assets:
+    - UniSend_icon.png
     - maZL.jpg
 
 # Enable Material 3 in app code by setting `useMaterial3: true` in MaterialApp
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: UniSend_icon.png

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -10,6 +12,7 @@ import 'providers/order_provider.dart';
 import 'services/chat_service.dart';
 import 'services/order_service.dart';
 import 'services/user_session_service.dart';
+import 'widgets/common/app_logo.dart';
 import 'views/auth/login_screen.dart';
 import 'views/auth/register_screen.dart';
 import 'views/main/main_navigation.dart';
@@ -80,6 +83,8 @@ class MainApp extends StatefulWidget {
 class _MainAppState extends State<MainApp> {
   fb.FirebaseAuth? _auth;
   ThemeMode _themeMode = ThemeMode.light;
+  Timer? _welcomeTimer;
+  bool _showWelcomeSplash = true;
   late final UserSessionService _userSessionService;
   late final OrderService _orderService;
   late final ChatService _chatService;
@@ -105,10 +110,20 @@ class _MainAppState extends State<MainApp> {
       chatService: _chatService,
       userSessionService: _userSessionService,
     );
+
+    _welcomeTimer = Timer(const Duration(milliseconds: 5000), () {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _showWelcomeSplash = false;
+      });
+    });
   }
 
   @override
   void dispose() {
+    _welcomeTimer?.cancel();
     _chatProvider.dispose();
     _orderProvider.dispose();
     _userSessionService.dispose();
@@ -288,6 +303,16 @@ class _MainAppState extends State<MainApp> {
       );
     }
 
+    if (_showWelcomeSplash) {
+      return MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: _buildTheme(Brightness.light),
+        darkTheme: _buildTheme(Brightness.dark),
+        themeMode: _themeMode,
+        home: const _WelcomeSplashScreen(),
+      );
+    }
+
     return MultiProvider(
       providers: [
         ChangeNotifierProvider<UserSessionService>.value(
@@ -348,6 +373,70 @@ class _MainAppState extends State<MainApp> {
                   return LoginScreen(onSignedIn: () => setState(() {}));
                 },
               ),
+      ),
+    );
+  }
+}
+
+class _WelcomeSplashScreen extends StatelessWidget {
+  const _WelcomeSplashScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Scaffold(
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              colorScheme.primary,
+              colorScheme.tertiary,
+              colorScheme.secondary,
+            ],
+          ),
+        ),
+        child: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Chào mừng đến với UniSend',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w900,
+                      color: Colors.white,
+                      height: 1.15,
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withAlpha(26),
+                      borderRadius: BorderRadius.circular(28),
+                    ),
+                    child: const AppLogo(size: 216),
+                  ),
+                  const SizedBox(height: 18),
+                  Text(
+                    'Đang khởi động ứng dụng...',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                      color: Colors.white.withAlpha(230),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
