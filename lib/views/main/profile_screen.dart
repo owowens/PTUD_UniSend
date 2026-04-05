@@ -1,5 +1,6 @@
-import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
@@ -1330,6 +1331,7 @@ class _VerificationSheet extends StatefulWidget {
 
 class _VerificationSheetState extends State<_VerificationSheet> {
   XFile? _selectedImage;
+  Uint8List? _selectedImageBytes;
   bool _isPicking = false;
 
   Future<void> _pickImage(ImageSource source) async {
@@ -1350,8 +1352,10 @@ class _VerificationSheetState extends State<_VerificationSheet> {
         return;
       }
       if (pickedFile != null) {
+        final imageBytes = await pickedFile.readAsBytes();
         setState(() {
           _selectedImage = pickedFile;
+          _selectedImageBytes = imageBytes;
         });
       }
     } finally {
@@ -1378,12 +1382,12 @@ class _VerificationSheetState extends State<_VerificationSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final preview = _selectedImage == null
+    final preview = _selectedImage == null || _selectedImageBytes == null
         ? const Center(child: Text('Chưa chọn ảnh thẻ sinh viên.'))
         : ClipRRect(
             borderRadius: BorderRadius.circular(12),
-            child: Image.file(
-              File(_selectedImage!.path),
+            child: Image.memory(
+              _selectedImageBytes!,
               height: 180,
               width: double.infinity,
               fit: BoxFit.cover,
@@ -1426,14 +1430,16 @@ class _VerificationSheetState extends State<_VerificationSheet> {
               icon: const Icon(Icons.photo_library_outlined),
               label: const Text('Tải ảnh từ thư viện'),
             ),
-            const SizedBox(height: 8),
-            OutlinedButton.icon(
-              onPressed: _isPicking
-                  ? null
-                  : () => _pickImage(ImageSource.camera),
-              icon: const Icon(Icons.photo_camera_outlined),
-              label: const Text('Chụp ảnh trực tiếp'),
-            ),
+            if (!kIsWeb) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _isPicking
+                    ? null
+                    : () => _pickImage(ImageSource.camera),
+                icon: const Icon(Icons.photo_camera_outlined),
+                label: const Text('Chụp ảnh trực tiếp'),
+              ),
+            ],
             const SizedBox(height: 16),
             FilledButton(
               onPressed: _submit,
